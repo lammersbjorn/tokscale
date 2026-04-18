@@ -3,6 +3,7 @@
 //! Each client has its own parser that converts to a unified message format.
 
 pub mod amp;
+pub mod claude_local_agent;
 pub mod claudecode;
 pub mod codex;
 pub mod copilot;

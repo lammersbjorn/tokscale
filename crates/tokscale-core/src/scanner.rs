@@ -223,6 +223,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "*.settings.json" => file_name.ends_with(".settings.json"),
                 "sessions.json" => file_name == "sessions.json",
                 "wire.jsonl" => file_name == "wire.jsonl",
+                "audit.jsonl" => file_name == "audit.jsonl",
                 "ui_messages.json" => file_name == "ui_messages.json",
                 "session-usage.json" => file_name == "session-usage.json",
                 _ => false,
@@ -444,6 +445,16 @@ fn push_unique_scan_task(
     client_id: ClientId,
     raw_path: impl Into<PathBuf>,
 ) {
+    push_unique_scan_task_with_pattern(tasks, seen, client_id, raw_path, client_id.data().pattern);
+}
+
+fn push_unique_scan_task_with_pattern(
+    tasks: &mut Vec<(ClientId, String, &'static str)>,
+    seen: &mut HashSet<(ClientId, PathBuf)>,
+    client_id: ClientId,
+    raw_path: impl Into<PathBuf>,
+    pattern: &'static str,
+) {
     let raw_path = raw_path.into();
     if raw_path.as_os_str().is_empty() {
         return;
@@ -451,7 +462,6 @@ fn push_unique_scan_task(
 
     let key = std::fs::canonicalize(&raw_path).unwrap_or_else(|_| raw_path.clone());
     if seen.insert((client_id, key)) {
-        let pattern = client_id.data().pattern;
         tasks.push((client_id, raw_path.to_string_lossy().to_string(), pattern));
     }
 }
@@ -636,6 +646,20 @@ fn scan_all_clients_with_env_strategy_inner(
             &mut seen_scan_roots,
             ClientId::OpenCode,
             opencode_path,
+        );
+    }
+
+    if enabled.contains(&ClientId::Claude) {
+        let local_agent_path = format!(
+            "{}/Library/Application Support/Claude/local-agent-mode-sessions",
+            home_dir
+        );
+        push_unique_scan_task_with_pattern(
+            &mut tasks,
+            &mut seen_scan_roots,
+            ClientId::Claude,
+            local_agent_path,
+            "audit.jsonl",
         );
     }
 
@@ -1083,6 +1107,14 @@ mod tests {
         let claude_path = base.join(".claude/projects/myproject");
         fs::create_dir_all(&claude_path).unwrap();
         let mut file = File::create(claude_path.join("conversation.jsonl")).unwrap();
+        file.write_all(b"").unwrap();
+    }
+
+    fn setup_mock_claude_local_agent_dir(base: &std::path::Path) {
+        let claude_path = base
+            .join("Library/Application Support/Claude/local-agent-mode-sessions/session-1/local-1");
+        fs::create_dir_all(&claude_path).unwrap();
+        let mut file = File::create(claude_path.join("audit.jsonl")).unwrap();
         file.write_all(b"").unwrap();
     }
 
@@ -1747,9 +1779,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
         setup_mock_claude_dir(home);
+        setup_mock_claude_local_agent_dir(home);
 
         let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
-        assert_eq!(result.get(ClientId::Claude).len(), 1);
+        assert_eq!(result.get(ClientId::Claude).len(), 2);
         assert!(result.get(ClientId::OpenCode).is_empty());
     }
 

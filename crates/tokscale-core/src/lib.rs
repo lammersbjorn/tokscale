@@ -717,8 +717,8 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 path,
                 &source_cache,
                 pricing,
-                message_cache::SourceFingerprint::from_claude_code_path,
-                sessions::claudecode::parse_claude_file,
+                claude_fingerprint_from_path,
+                parse_claude_source,
             )
         })
         .collect();
@@ -1466,6 +1466,33 @@ fn apply_headless_agent(message: &mut UnifiedMessage, is_headless: bool) {
     }
 }
 
+fn claude_fingerprint_from_path(path: &Path) -> Option<message_cache::SourceFingerprint> {
+    if sessions::claude_local_agent::is_claude_local_agent_audit_path(path) {
+        message_cache::SourceFingerprint::from_path(path)
+    } else {
+        message_cache::SourceFingerprint::from_claude_code_path(path)
+    }
+}
+
+fn parse_claude_source(path: &Path) -> Vec<UnifiedMessage> {
+    if sessions::claude_local_agent::is_claude_local_agent_audit_path(path) {
+        sessions::claude_local_agent::parse_claude_local_agent_audit(path)
+    } else {
+        sessions::claudecode::parse_claude_file(path)
+    }
+}
+
+fn parse_claude_source_with_cache(
+    path: &Path,
+    parent_cache: &mut HashMap<PathBuf, HashMap<String, String>>,
+) -> Vec<UnifiedMessage> {
+    if sessions::claude_local_agent::is_claude_local_agent_audit_path(path) {
+        sessions::claude_local_agent::parse_claude_local_agent_audit(path)
+    } else {
+        sessions::claudecode::parse_claude_file_with_cache(path, parent_cache)
+    }
+}
+
 fn apply_pricing_if_available(
     message: &mut UnifiedMessage,
     pricing: Option<&pricing::PricingService>,
@@ -1634,7 +1661,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .get(ClientId::Claude)
         .par_iter()
         .map_init(std::collections::HashMap::new, |parent_cache, path| {
-            sessions::claudecode::parse_claude_file_with_cache(path, parent_cache)
+            parse_claude_source_with_cache(path, parent_cache)
                 .into_iter()
                 .map(|msg| {
                     let dedup_key = msg.dedup_key.clone().unwrap_or_default();
