@@ -183,10 +183,17 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                     .to_string_lossy()
                     .eq_ignore_ascii_case("archive")
             });
+            let is_in_chat_sessions_dir = path.components().any(|c| {
+                c.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("chatSessions")
+            });
 
             match pattern {
                 "*.json" => file_name.ends_with(".json"),
                 "*.jsonl" => file_name.ends_with(".jsonl"),
+                "chat-session-*.json" => is_in_chat_sessions_dir && file_name.ends_with(".json"),
+                "chat-session-*.jsonl" => is_in_chat_sessions_dir && file_name.ends_with(".jsonl"),
                 // OpenClaw: also match archived transcripts
                 // (<uuid>.jsonl.deleted.<ts>, <uuid>.jsonl.reset.<ts>)
                 "*.jsonl*" => {
@@ -441,7 +448,7 @@ fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
 
 fn push_unique_scan_task(
     tasks: &mut Vec<(ClientId, String, &'static str)>,
-    seen: &mut HashSet<(ClientId, PathBuf)>,
+    seen: &mut HashSet<(ClientId, PathBuf, &'static str)>,
     client_id: ClientId,
     raw_path: impl Into<PathBuf>,
 ) {
@@ -450,7 +457,7 @@ fn push_unique_scan_task(
 
 fn push_unique_scan_task_with_pattern(
     tasks: &mut Vec<(ClientId, String, &'static str)>,
-    seen: &mut HashSet<(ClientId, PathBuf)>,
+    seen: &mut HashSet<(ClientId, PathBuf, &'static str)>,
     client_id: ClientId,
     raw_path: impl Into<PathBuf>,
     pattern: &'static str,
@@ -461,9 +468,23 @@ fn push_unique_scan_task_with_pattern(
     }
 
     let key = std::fs::canonicalize(&raw_path).unwrap_or_else(|_| raw_path.clone());
-    if seen.insert((client_id, key)) {
+    if seen.insert((client_id, key, pattern)) {
         tasks.push((client_id, raw_path.to_string_lossy().to_string(), pattern));
     }
+}
+
+fn copilot_vscode_workspace_storage_roots(home_dir: &str) -> Vec<PathBuf> {
+    vec![
+        PathBuf::from(format!(
+            "{}/Library/Application Support/Code/User/workspaceStorage",
+            home_dir
+        )),
+        PathBuf::from(format!(
+            "{}/Library/Application Support/Code - Insiders/User/workspaceStorage",
+            home_dir
+        )),
+        PathBuf::from(format!("{}/.config/Code/User/workspaceStorage", home_dir)),
+    ]
 }
 
 /// Merge user-configured OpenCode db paths from [`ScannerSettings`] into the
@@ -569,7 +590,7 @@ fn scan_all_clients_with_env_strategy_inner(
 
     // Define scan tasks
     let mut tasks: Vec<(ClientId, String, &str)> = Vec::new();
-    let mut seen_scan_roots: HashSet<(ClientId, PathBuf)> = HashSet::new();
+    let mut seen_scan_roots: HashSet<(ClientId, PathBuf, &'static str)> = HashSet::new();
 
     for client_id in &enabled {
         if matches!(
@@ -661,6 +682,25 @@ fn scan_all_clients_with_env_strategy_inner(
             local_agent_path,
             "audit.jsonl",
         );
+    }
+
+    if enabled.contains(&ClientId::Copilot) {
+        for root in copilot_vscode_workspace_storage_roots(home_dir) {
+            push_unique_scan_task_with_pattern(
+                &mut tasks,
+                &mut seen_scan_roots,
+                ClientId::Copilot,
+                root.clone(),
+                "chat-session-*.json",
+            );
+            push_unique_scan_task_with_pattern(
+                &mut tasks,
+                &mut seen_scan_roots,
+                ClientId::Copilot,
+                root,
+                "chat-session-*.jsonl",
+            );
+        }
     }
 
     if enabled.contains(&ClientId::Codex) {
@@ -885,6 +925,15 @@ mod tests {
         let file_path = sessions_dir.join("copilot.jsonl");
         let mut file = File::create(file_path).unwrap();
         writeln!(file, "{{\"type\":\"span\",\"name\":\"chat gpt-5.4-mini\"}}").unwrap();
+    }
+
+    fn setup_mock_copilot_vscode_dir(home: &Path) {
+        let sessions_dir = home.join(
+            "Library/Application Support/Code/User/workspaceStorage/workspace-1/chatSessions",
+        );
+        fs::create_dir_all(&sessions_dir).unwrap();
+        File::create(sessions_dir.join("session.jsonl")).unwrap();
+        File::create(sessions_dir.join("session.json")).unwrap();
     }
 
     #[test]
@@ -1832,6 +1881,27 @@ mod tests {
         assert_eq!(result.get(ClientId::Copilot), &vec![explicit_file]);
 
         restore_env("COPILOT_OTEL_FILE_EXPORTER_PATH", previous);
+    }
+
+    #[test]
+    fn test_scan_all_clients_copilot_includes_vscode_chat_sessions() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_copilot_vscode_dir(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["copilot".to_string()],
+            false,
+        );
+
+        assert_eq!(result.get(ClientId::Copilot).len(), 2);
+        assert!(result.get(ClientId::Copilot)[0]
+            .to_string_lossy()
+            .contains("chatSessions"));
+        assert!(result.get(ClientId::Copilot)[1]
+            .to_string_lossy()
+            .contains("chatSessions"));
     }
 
     #[test]
