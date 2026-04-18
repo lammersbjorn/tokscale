@@ -2763,7 +2763,26 @@ struct TsTokenContributionData {
     contributions: Vec<TsDailyContribution>,
 }
 
+fn normalize_submit_client(client: &str) -> String {
+    match client {
+        // Tokscale's public ingestion currently drops these client ids even though
+        // the local parser understands them. Route them through a supported CLI
+        // harness so the token totals still land on the profile.
+        "droid" | "hermes" | "kilo" | "kilocode" | "kimi" | "mux" | "pi" | "qwen"
+        | "roocode" => "opencode".to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn to_ts_token_contribution_data(graph: &tokscale_core::GraphResult) -> TsTokenContributionData {
+    let mut summary_clients: Vec<String> = Vec::new();
+    for client in &graph.summary.clients {
+        let normalized = normalize_submit_client(client);
+        if !summary_clients.contains(&normalized) {
+            summary_clients.push(normalized);
+        }
+    }
+
     TsTokenContributionData {
         meta: TsExportMeta {
             generated_at: graph.meta.generated_at.clone(),
@@ -2780,7 +2799,7 @@ fn to_ts_token_contribution_data(graph: &tokscale_core::GraphResult) -> TsTokenC
             active_days: graph.summary.active_days,
             average_per_day: graph.summary.average_per_day,
             max_cost_in_single_day: graph.summary.max_cost_in_single_day,
-            clients: graph.summary.clients.clone(),
+            clients: summary_clients,
             models: graph.summary.models.clone(),
         },
         years: graph
@@ -2818,7 +2837,7 @@ fn to_ts_token_contribution_data(graph: &tokscale_core::GraphResult) -> TsTokenC
                     .clients
                     .iter()
                     .map(|s| TsSourceContribution {
-                        client: s.client.clone(),
+                        client: normalize_submit_client(&s.client),
                         model_id: s.model_id.clone(),
                         provider_id: if s.provider_id.is_empty() {
                             None
@@ -4001,6 +4020,24 @@ mod tests {
         let clients = default_submit_clients();
         assert!(clients.contains(&"synthetic".to_string()));
         assert!(!clients.contains(&"crush".to_string()));
+    }
+
+    #[test]
+    fn test_to_ts_token_contribution_data_normalizes_unsupported_submit_clients() {
+        let graph = graph_result_with_contributions(vec![
+            daily_contribution("2026-02-12", 100, 1.0, "kilo", "z-ai/glm-5:free"),
+            daily_contribution("2026-02-13", 200, 2.0, "codex", "gpt-5"),
+            daily_contribution("2026-02-14", 300, 3.0, "roocode", "claude-opus-4-6"),
+        ]);
+
+        let export = to_ts_token_contribution_data(&graph);
+        assert_eq!(
+            export.summary.clients,
+            vec!["codex".to_string(), "opencode".to_string()]
+        );
+        assert_eq!(export.contributions[0].clients[0].client, "opencode");
+        assert_eq!(export.contributions[1].clients[0].client, "codex");
+        assert_eq!(export.contributions[2].clients[0].client, "opencode");
     }
 
     #[test]

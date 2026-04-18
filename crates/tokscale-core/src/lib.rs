@@ -946,16 +946,34 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    // Kilo CLI: SQLite database
-    if let Some(db_path) = &scan_result.kilo_db {
-        let kilo_messages: Vec<UnifiedMessage> = sessions::kilo::parse_kilo_sqlite(db_path)
-            .into_iter()
-            .map(|mut msg| {
-                apply_pricing_if_available(&mut msg, pricing);
-                msg
+    let kilo_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Kilo)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::kilo::parse_kilo_file(path).into_iter().collect()
             })
-            .collect();
-        all_messages.extend(kilo_messages);
+        })
+        .collect();
+    for outcome in kilo_outcomes {
+        all_messages.extend(outcome.messages);
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
+    // Kilo CLI legacy fallback: SQLite database
+    if scan_result.get(ClientId::Kilo).is_empty() {
+        if let Some(db_path) = &scan_result.kilo_db {
+            let kilo_messages: Vec<UnifiedMessage> = sessions::kilo::parse_kilo_sqlite(db_path)
+                .into_iter()
+                .map(|mut msg| {
+                    apply_pricing_if_available(&mut msg, pricing);
+                    msg
+                })
+                .collect();
+            all_messages.extend(kilo_messages);
+        }
     }
 
     if let Some(db_path) = &scan_result.hermes_db {
@@ -1856,19 +1874,32 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Mux, mux_count);
     messages.extend(mux_msgs);
 
-    // Kilo CLI: SQLite database
-    let _kilo_count: i32 = if let Some(db_path) = &scan_result.kilo_db {
-        let kilo_msgs: Vec<ParsedMessage> = sessions::kilo::parse_kilo_sqlite(db_path)
-            .into_iter()
-            .map(|msg| unified_to_parsed(&msg))
-            .collect();
-        let count = summed_parsed_message_count(&kilo_msgs);
-        counts.set(ClientId::Kilo, count);
-        messages.extend(kilo_msgs);
-        count
-    } else {
-        0
-    };
+    let kilo_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::Kilo)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::kilo::parse_kilo_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let kilo_count = summed_parsed_message_count(&kilo_msgs);
+    counts.set(ClientId::Kilo, kilo_count);
+    messages.extend(kilo_msgs);
+
+    // Kilo CLI legacy fallback: SQLite database
+    if scan_result.get(ClientId::Kilo).is_empty() {
+        if let Some(db_path) = &scan_result.kilo_db {
+            let kilo_msgs: Vec<ParsedMessage> = sessions::kilo::parse_kilo_sqlite(db_path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect();
+            let count = summed_parsed_message_count(&kilo_msgs);
+            counts.set(ClientId::Kilo, count);
+            messages.extend(kilo_msgs);
+        }
+    }
 
     if let Some(db_path) = &scan_result.hermes_db {
         let hermes_msgs: Vec<ParsedMessage> = sessions::hermes::parse_hermes_sqlite(db_path)

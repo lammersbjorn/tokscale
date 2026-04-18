@@ -162,14 +162,33 @@ fn parse_copilot_vscode_chat_session(path: &Path) -> Vec<UnifiedMessage> {
             Err(_) => continue,
         };
 
-        let keys = match entry.get("k").and_then(Value::as_array) {
-            Some(keys) => keys,
-            None => continue,
-        };
-
         match entry.get("kind").and_then(Value::as_i64) {
-            Some(2) if is_requests_root_patch(keys) => {
+            Some(0) => {
+                if let Some(snapshot_requests) = entry
+                    .get("v")
+                    .and_then(Value::as_object)
+                    .and_then(|snapshot| snapshot.get("requests"))
+                    .and_then(Value::as_array)
+                {
+                    requests = snapshot_requests
+                        .iter()
+                        .map(VsCodeRequestState::from_request)
+                        .collect();
+                    messages.extend(snapshot_requests.iter().filter_map(|request| {
+                        parse_vscode_request_snapshot(request, path, fallback_timestamp)
+                    }));
+                }
+            }
+            Some(2)
+                if entry
+                    .get("k")
+                    .and_then(Value::as_array)
+                    .is_some_and(|keys| is_requests_root_patch(keys)) =>
+            {
                 if let Some(appended_requests) = entry.get("v").and_then(Value::as_array) {
+                    messages.extend(appended_requests.iter().filter_map(|request| {
+                        parse_vscode_request_snapshot(request, path, fallback_timestamp)
+                    }));
                     requests.extend(
                         appended_requests
                             .iter()
@@ -177,7 +196,15 @@ fn parse_copilot_vscode_chat_session(path: &Path) -> Vec<UnifiedMessage> {
                     );
                 }
             }
-            Some(1) if is_request_result_patch(keys) => {
+            Some(1)
+                if entry
+                    .get("k")
+                    .and_then(Value::as_array)
+                    .is_some_and(|keys| is_request_result_patch(keys)) =>
+            {
+                let Some(keys) = entry.get("k").and_then(Value::as_array) else {
+                    continue;
+                };
                 let Some(index) = keys
                     .get(1)
                     .and_then(Value::as_u64)
@@ -337,7 +364,8 @@ fn exact_prompt_output_tokens(result: &Value) -> Option<(i64, i64)> {
     let output = metadata
         .and_then(|metadata| metadata.get("outputTokens"))
         .and_then(value_as_i64)
-        .or_else(|| result.get("outputTokens").and_then(value_as_i64))?;
+        .or_else(|| result.get("outputTokens").and_then(value_as_i64))
+        .unwrap_or(0);
     Some((prompt.max(0), output.max(0)))
 }
 
@@ -599,6 +627,74 @@ mod tests {
         assert_eq!(
             message.dedup_key.as_deref(),
             Some("copilot-vscode:session:request-2")
+        );
+    }
+
+    #[test]
+    fn test_parse_copilot_vscode_jsonl_uses_initial_snapshot_requests() {
+        let content = r#"{"kind":0,"v":{"sessionId":"session-4","requests":[{"requestId":"request-4","timestamp":1775150932800,"modelId":"copilot/claude-opus-4.6","responseId":"response-4"}]}}
+{"kind":1,"k":["requests",0,"result"],"v":{"metadata":{"promptTokens":31591,"outputTokens":2},"resolvedModel":"claude-opus-4.6","sessionId":"session-4"}}"#;
+        let path = create_vscode_chat_session_file("session-initial-snapshot.jsonl", content);
+
+        let messages = parse_copilot_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.client, "copilot");
+        assert_eq!(message.model_id, "claude-opus-4-6");
+        assert_eq!(message.provider_id, "anthropic");
+        assert_eq!(message.session_id, "session-4");
+        assert_eq!(message.timestamp, 1_775_150_932_800);
+        assert_eq!(message.tokens.input, 31_591);
+        assert_eq!(message.tokens.output, 2);
+        assert_eq!(
+            message.dedup_key.as_deref(),
+            Some("copilot-vscode:session-4:response-4")
+        );
+    }
+
+    #[test]
+    fn test_parse_copilot_vscode_appended_request_with_inline_result() {
+        let content = r#"{"kind":2,"k":["requests"],"v":[{"requestId":"request-5","timestamp":1775150932900,"modelId":"copilot/gpt-5.4","responseId":"response-5","result":{"metadata":{"promptTokens":25721,"outputTokens":9},"sessionId":"session-5"}}]}"#;
+        let path = create_vscode_chat_session_file("session-inline-result.jsonl", content);
+
+        let messages = parse_copilot_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.client, "copilot");
+        assert_eq!(message.model_id, "gpt-5.4");
+        assert_eq!(message.provider_id, "openai");
+        assert_eq!(message.session_id, "session-5");
+        assert_eq!(message.timestamp, 1_775_150_932_900);
+        assert_eq!(message.tokens.input, 25_721);
+        assert_eq!(message.tokens.output, 9);
+        assert_eq!(
+            message.dedup_key.as_deref(),
+            Some("copilot-vscode:session-5:response-5")
+        );
+    }
+
+    #[test]
+    fn test_parse_copilot_vscode_result_patch_without_output_tokens() {
+        let content = r#"{"kind":2,"k":["requests"],"v":[{"requestId":"request-3","timestamp":1775150932700,"modelId":"copilot/gpt-5-mini","responseId":"response-3"}]}
+{"kind":1,"k":["requests",0,"result"],"v":{"metadata":{"promptTokens":20040},"resolvedModel":"copilot/gpt-5-mini","responseId":"response-3","sessionId":"session-3"}}"#;
+        let path = create_vscode_chat_session_file("session-missing-output.jsonl", content);
+
+        let messages = parse_copilot_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.client, "copilot");
+        assert_eq!(message.model_id, "gpt-5-mini");
+        assert_eq!(message.provider_id, "openai");
+        assert_eq!(message.session_id, "session-3");
+        assert_eq!(message.timestamp, 1_775_150_932_700);
+        assert_eq!(message.tokens.input, 20_040);
+        assert_eq!(message.tokens.output, 0);
+        assert_eq!(
+            message.dedup_key.as_deref(),
+            Some("copilot-vscode:session-3:response-3")
         );
     }
 }

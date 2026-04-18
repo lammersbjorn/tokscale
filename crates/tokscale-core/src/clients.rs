@@ -266,8 +266,8 @@ define_clients!(
     Kilo = 14 => {
         id: "kilo",
         root: PathRoot::XdgData,
-        relative: "kilo/kilo.db",
-        pattern: "kilo.db",
+        relative: "kilo/storage/message",
+        pattern: "*.json",
         headless: false,
         parse_local: true,
         submit_default: true

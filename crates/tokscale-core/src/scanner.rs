@@ -436,14 +436,10 @@ fn discover_crush_dbs(home_dir: &str, use_env_roots: bool) -> Vec<CrushDbSource>
 }
 
 fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
-    // Kilo CLI currently loads a single SQLite DB via `scan_result.kilo_db`
-    // Kilo CLI and Hermes use SQLite database paths, Roo/KiloCode require local + remote
-    // and server task roots, and Crush discovers SQLite DBs via the project
+    // Hermes uses a single SQLite database path, Roo/KiloCode require local + remote
+    // server task roots, and Crush discovers SQLite DBs via the project
     // registry rather than scanned file paths.
-    !matches!(
-        client_id,
-        ClientId::Kilo | ClientId::Crush | ClientId::Hermes
-    )
+    !matches!(client_id, ClientId::Crush | ClientId::Hermes)
 }
 
 fn push_unique_scan_task(
@@ -600,7 +596,6 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::OpenClaw
                 | ClientId::RooCode
                 | ClientId::KiloCode
-                | ClientId::Kilo
                 | ClientId::Hermes
                 | ClientId::Crush
         ) {
@@ -843,9 +838,10 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Kilo) {
-        let kilo_db_path = ClientId::Kilo
-            .data()
-            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        let kilo_db_path = format!(
+            "{}/kilo/kilo.db",
+            crate::clients::PathRoot::XdgData.resolve_with_env_strategy(home_dir, use_env_roots)
+        );
         if std::path::Path::new(&kilo_db_path).exists() {
             result.kilo_db = Some(PathBuf::from(kilo_db_path));
         }
@@ -1253,6 +1249,13 @@ mod tests {
         fs::create_dir_all(&server).unwrap();
         File::create(local.join("ui_messages.json")).unwrap();
         File::create(server.join("ui_messages.json")).unwrap();
+    }
+
+    fn setup_mock_kilo_message_dir(base: &std::path::Path) {
+        let kilo_messages = base.join(".local/share/kilo/storage/message/session-1");
+        fs::create_dir_all(&kilo_messages).unwrap();
+        File::create(kilo_messages.join("msg-1.json")).unwrap();
+        File::create(kilo_messages.join("msg-2.json")).unwrap();
     }
 
     fn setup_mock_crush_registry(registry_path: &Path, projects_json: &str) {
@@ -2269,6 +2272,20 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_all_clients_kilo_storage_messages() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_kilo_message_dir(home);
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["kilo".to_string()]);
+        assert_eq!(result.get(ClientId::Kilo).len(), 2);
+        assert!(result
+            .get(ClientId::Kilo)
+            .iter()
+            .all(|p| p.extension().and_then(|ext| ext.to_str()) == Some("json")));
+    }
+
+    #[test]
     fn test_parse_extra_dirs_basic() {
         let enabled: HashSet<ClientId> = [ClientId::Claude, ClientId::OpenClaw]
             .iter()
@@ -2294,13 +2311,15 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_extra_dirs_skips_unsupported_clients() {
+    fn test_parse_extra_dirs_includes_supported_kilo_client() {
         let enabled: HashSet<ClientId> =
             [ClientId::Claude, ClientId::Kilo].iter().copied().collect();
         let dirs = parse_extra_dirs("claude:/tmp/mac-sessions,kilo:/tmp/kilo", &enabled);
-        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs.len(), 2);
         assert_eq!(dirs[0].0, ClientId::Claude);
         assert_eq!(dirs[0].1, "/tmp/mac-sessions");
+        assert_eq!(dirs[1].0, ClientId::Kilo);
+        assert_eq!(dirs[1].1, "/tmp/kilo");
     }
 
     #[test]
